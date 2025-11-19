@@ -1,0 +1,27 @@
+# Go build and dependency files
+/bin/
+/build/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+
+# Output of go coverage tool
+*.out
+
+# IDE/editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Root hints and other data files
+root.hints
