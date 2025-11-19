@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 )
@@ -41,6 +42,15 @@ type DNSResourceRecord struct {
 	CLASS 	 uint16
 	TTL   	 uint32
 	RDLENGTH uint16
+	RDATA    []byte
+}
+
+type DNSPacket struct {
+    Header      DNSHeader
+    Questions   []QuestionSection
+    Answers     []DNSResourceRecord
+    Authorities []DNSResourceRecord
+    Additionals []DNSResourceRecord
 }
 
 func (f *Flags) Pack() uint16 {
@@ -141,9 +151,9 @@ func parseDomainName(fullPacket []byte, offset int) (string, int, error) {
 
 			labels = append(labels, restOfName)
 
-			return strings.Join(labels, "."), ptr +1, nil
+			return strings.Join(labels, "."), ptr +2, nil
 		} else if b == 0 {
-			return strings.Join(labels, "."), ptr, nil
+			return strings.Join(labels, "."), ptr +1, nil
 		} else {
 			length := int(b)
 
@@ -159,8 +169,115 @@ func parseDomainName(fullPacket []byte, offset int) (string, int, error) {
 	}
 }
 
+// parseResourceRecord parses a single Resource Record (RR) from the packet.
+func parseResourceRecord(packet []byte, offset int) (DNSResourceRecord, int, error) {
+	rr := DNSResourceRecord{}
 
+	// 1. Parse the NAME
+	s, newOffset, err := parseDomainName(packet, offset)
+	if err != nil {
+		return rr, offset, err
+	}
+	rr.NAME = []byte(s)
+	offset = newOffset
 
+	// 2. Check if we have enough bytes for the fixed header (Type+Class+TTL+Length = 10 bytes)
+	if offset+10 > len(packet) {
+		return rr, offset, errors.New("packet too short for RR header")
+	}
+
+	rr.TYPE = binary.BigEndian.Uint16(packet[offset : offset+2])
+	offset += 2
+
+	rr.CLASS = binary.BigEndian.Uint16(packet[offset : offset+2])
+	offset += 2
+
+	rr.TTL = binary.BigEndian.Uint32(packet[offset : offset+4])
+	offset += 4
+
+	rr.RDLENGTH = binary.BigEndian.Uint16(packet[offset : offset+2])
+	offset += 2
+
+	// 3. Check if we have enough bytes for the RDATA
+	// This is where your crash happened! We must check BEFORE slicing.
+	if offset+int(rr.RDLENGTH) > len(packet) {
+		return rr, offset, fmt.Errorf("packet too short for RDATA: need %d bytes, have %d", offset + int(rr.RDLENGTH), len(packet))	
+	}
+
+	rr.RDATA = packet[offset : offset+int(rr.RDLENGTH)]
+	offset += int(rr.RDLENGTH)
+
+	return rr, offset, nil
+}
+
+func parseDNSPacket(packet []byte) (DNSPacket, error) {
+	result := DNSPacket{}
+	
+	// 1. Parse Header (First 12 bytes)
+	buf := bytes.NewBuffer(packet[:12])
+	err := binary.Read(buf, binary.BigEndian, &result.Header)
+	if err != nil {
+		return result, err
+	}
+
+	offset := 12 // Header is always 12 bytes
+
+	// 2. Parse Questions
+	for i := 0; i < int(result.Header.QDCOUNT); i++ {
+		var qs QuestionSection
+		var name string
+		
+		// Use your existing helper
+		name, offset, err = parseDomainName(packet, offset)
+		if err != nil {
+			return result, err
+		}
+		qs.QNAME = []byte(name)
+		
+		if offset+4 > len(packet) {
+			return result, errors.New("packet too short for Question")
+		}
+		qs.QTYPE = binary.BigEndian.Uint16(packet[offset : offset+2])
+		offset += 2
+		qs.QClass = binary.BigEndian.Uint16(packet[offset : offset+2])
+		offset += 2
+		
+		result.Questions = append(result.Questions, qs)
+	}
+
+	// 3. Parse Answers
+	for i := 0; i < int(result.Header.ANCOUNT); i++ {
+		// Use your existing helper
+		rr, newOffset, err := parseResourceRecord(packet, offset)
+		if err != nil {
+			return result, err
+		}
+		offset = newOffset
+		result.Answers = append(result.Answers, rr)
+	}
+
+	// 4. Parse Authorities
+	for i := 0; i < int(result.Header.NSCOUNT); i++ {
+		rr, newOffset, err := parseResourceRecord(packet, offset)
+		if err != nil {
+			return result, err
+		}
+		offset = newOffset
+		result.Authorities = append(result.Authorities, rr)
+	}
+
+	// 5. Parse Additionals
+	for i := 0; i < int(result.Header.ARCOUNT); i++ {
+		rr, newOffset, err := parseResourceRecord(packet, offset)
+		if err != nil {
+			return result, err
+		}
+		offset = newOffset
+		result.Additionals = append(result.Additionals, rr)
+	}
+
+	return result, nil
+}
 
 func buildQuery(s string) ([]byte, error) {
 	f := Flags{
